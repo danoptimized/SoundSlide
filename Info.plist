@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>local.EdgeVolume</string>
+	<string>local.SoundSlide</string>
 	<key>CFBundleName</key>
-	<string>EdgeVolume</string>
+	<string>SoundSlide</string>
 	<key>CFBundleExecutable</key>
-	<string>EdgeVolume</string>
+	<string>SoundSlide</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

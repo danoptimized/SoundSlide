@@ -1,4 +1,4 @@
-// EdgeVolume: hold Control and slide a finger up or down the right edge of the
+// SoundSlide: hold Control and slide a finger up or down the right edge of the
 // trackpad to change the volume.
 //
 // Idle cost is one event tap that only hears modifier keys. The trackpad is
@@ -221,11 +221,70 @@ func installTaps() -> Bool {
     return flagsTap != nil
 }
 
+private let radiantGreenBright = NSColor(calibratedRed: 0.35, green: 1.0, blue: 0.55, alpha: 1)
+private let radiantGreenCore = NSColor(calibratedRed: 0.15, green: 0.95, blue: 0.42, alpha: 1)
+private let radiantGreenDeep = NSColor(calibratedRed: 0.05, green: 0.72, blue: 0.28, alpha: 1)
+
+final class VolumeBarView: NSView {
+    var level: CGFloat = 0 {
+        didSet { layoutFill() }
+    }
+
+    private let fill = CAGradientLayer()
+    private let glow = CALayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 3
+        layer?.masksToBounds = false
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.1).cgColor
+
+        fill.colors = [
+            radiantGreenDeep.cgColor,
+            radiantGreenCore.cgColor,
+            radiantGreenBright.cgColor,
+            radiantGreenCore.cgColor,
+        ]
+        fill.locations = [0, 0.35, 0.55, 1]
+        fill.startPoint = CGPoint(x: 0, y: 0.5)
+        fill.endPoint = CGPoint(x: 1, y: 0.5)
+        fill.cornerRadius = 2
+
+        glow.backgroundColor = radiantGreenCore.withAlphaComponent(0.35).cgColor
+        glow.cornerRadius = 3
+        glow.shadowColor = radiantGreenBright.cgColor
+        glow.shadowOpacity = 1
+        glow.shadowRadius = 8
+        glow.shadowOffset = .zero
+
+        layer?.addSublayer(glow)
+        layer?.addSublayer(fill)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        layoutFill()
+    }
+
+    private func layoutFill() {
+        let inset: CGFloat = 1
+        let track = bounds.insetBy(dx: inset, dy: inset)
+        let width = max(0, track.width * level)
+        let fillFrame = CGRect(x: track.minX, y: track.minY, width: width, height: track.height)
+        fill.frame = fillFrame
+        glow.frame = fillFrame.insetBy(dx: -1.5, dy: -1.5)
+    }
+}
+
 // A small on-screen level bar, since setting the volume directly shows no system overlay.
 final class LevelOverlay {
-    private let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 220, height: 44),
+    private let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 188, height: 28),
                                 styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
-    private let bar = NSProgressIndicator(frame: NSRect(x: 48, y: 12, width: 156, height: 20))
+    private let bar = VolumeBarView(frame: NSRect(x: 34, y: 10, width: 142, height: 8))
     private var hides = 0
 
     init() {
@@ -233,13 +292,13 @@ final class LevelOverlay {
         background.material = .hudWindow
         background.state = .active
         background.wantsLayer = true
-        background.layer?.cornerRadius = 12
+        background.layer?.cornerRadius = 8
         background.layer?.masksToBounds = true
-        let icon = NSImageView(frame: NSRect(x: 14, y: 10, width: 24, height: 24))
-        icon.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "Volume")
-        bar.isIndeterminate = false
-        bar.minValue = 0
-        bar.maxValue = 1
+        let icon = NSImageView(frame: NSRect(x: 10, y: 6, width: 16, height: 16))
+        let symbol = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "Volume")
+        symbol?.isTemplate = true
+        icon.image = symbol
+        icon.contentTintColor = radiantGreenBright
         background.addSubview(icon)
         background.addSubview(bar)
         panel.contentView = background
@@ -252,10 +311,11 @@ final class LevelOverlay {
 
     func show(_ level: Float32) {
         hides += 1
-        bar.doubleValue = Double(level)
-        guard !panel.isVisible, let screen = NSScreen.main?.visibleFrame else { return }
-        panel.setFrameOrigin(NSPoint(x: screen.midX - panel.frame.width / 2, y: screen.minY + 120))
-        panel.orderFrontRegardless()
+        bar.level = CGFloat(level)
+        if !panel.isVisible, let screen = NSScreen.main?.visibleFrame {
+            panel.setFrameOrigin(NSPoint(x: screen.midX - panel.frame.width / 2, y: screen.minY + 120))
+            panel.orderFrontRegardless()
+        }
     }
 
     func hideSoon() {
@@ -277,7 +337,7 @@ func showLevel(_ level: Float32?) {
 @main
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static func main() {
-        freopen("/tmp/edgevolume-debug.log", "w", stderr)   // DEBUG
+        freopen("/tmp/soundslide-debug.log", "w", stderr)   // DEBUG
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
