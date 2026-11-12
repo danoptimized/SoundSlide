@@ -158,6 +158,7 @@ func handleFrame(pad: UInt, fingers: [Finger]) {
         muted = false
     }
     volume = target
+    volumeSplash.noteSelfInitiatedChange()
     setOutputProperty(output, kAudioHardwareServiceDeviceProperty_VirtualMainVolume, volume)
     showLevel(volume)
 }
@@ -555,6 +556,36 @@ private final class WeakProxy: NSObject {
     @objc func beat(_ sender: Any) { target?.beat(sender) }
 }
 
+private final class SplashProxy: NSObject {
+    private weak var target: VolumeKeySplash?
+    init(_ target: VolumeKeySplash) { self.target = target }
+
+    @objc func beat(_ sender: Any) { target?.beat(sender) }
+}
+
+/// One droplet of the volume-key splash, in the splash window's coordinates
+/// (origin at the bottom edge of the screen).
+private final class SplashDroplet {
+    let layer = CALayer()
+    let life: CGFloat
+    var x: CGFloat, y: CGFloat, vx: CGFloat, vy: CGFloat
+    var age: CGFloat = 0
+    var bounces = 0
+
+    init(x: CGFloat, y: CGFloat, vx: CGFloat, vy: CGFloat, life: CGFloat) {
+        self.x = x
+        self.y = y
+        self.vx = vx
+        self.vy = vy
+        self.life = life
+        let radius: CGFloat = 2.2 + CGFloat(drand48()) * 2.4
+        layer.bounds = CGRect(x: 0, y: 0, width: radius * 2, height: radius * 2)
+        layer.cornerRadius = radius
+        layer.backgroundColor = (drand48() < 0.55 ? radiantGreenBright : radiantGreenCore).cgColor
+        layer.actions = ["position": NSNull(), "bounds": NSNull(), "opacity": NSNull()]
+    }
+}
+
 // A wide on-screen level bar with a fluid, spring-driven fill, since setting
 // the volume directly shows no system overlay. The panel is rebuilt fresh
 // every time it is brought back: one left sitting unused can lose its window
@@ -655,6 +686,219 @@ func showLevel(_ level: Float32?) {
     if let level { overlay.show(level) } else { overlay.hideSoon() }
 }
 
+// A burst of green droplets leaping up from the bottom-right of the screen
+// when the volume keys change the system volume — a fountain near where the
+// volume keys sit. Volume up leaps higher and denser than volume down, and
+// the whole burst grows a little with the volume level.
+final class VolumeKeySplash {
+    private var panel: NSPanel?
+    private var host: NSView?
+    private var droplets: [SplashDroplet] = []
+    private var timer: Timer?
+    private var lastBeat: CFTimeInterval = 0
+    private var lastVolume: Double?
+    private var selfInitiatedUntil = CFTimeInterval(0)   // our own slide's writes, not the keys
+
+    /// Harness hook: droplets render here instead of in the splash window.
+    var testHost: NSView?
+    var liveCount: Int { droplets.count }
+
+    /// Marks a volume change the app makes itself (the trackpad slide), so
+    /// the listener's echo of that write does not splash.
+    func noteSelfInitiatedChange() {
+        selfInitiatedUntil = CACurrentMediaTime() + 0.4
+    }
+
+    func volumeChanged(to newVolume: Double, reason: String?) {
+        let previous = lastVolume
+        lastVolume = newVolume
+        guard reason == "ExplicitVolumeChange" else { return }
+        guard let previous, abs(newVolume - previous) > 0.001 else { return }   // no change, or first observation
+        guard CACurrentMediaTime() >= selfInitiatedUntil else { return }
+        let up = newVolume > previous
+        burst(up: up, volume: newVolume)
+    }
+
+    private func burst(up: Bool, volume: Double) {
+        let target = testHost
+        if target == nil {
+            makePanelIfNeeded()
+            placePanel()
+            if let panel, !panel.isVisible { panel.orderFrontRegardless() }
+        }
+        guard let layer = testHost?.layer ?? host?.layer else { return }
+        ensureRunning()
+        let speedFactor = CGFloat(0.7 + 0.6 * volume)
+        let count = up ? 14 + Int(drand48() * 8) : 8 + Int(drand48() * 6)
+        for _ in 0..<count where droplets.count < 150 {
+            let speed = (up ? CGFloat(320 + 330 * drand48()) : CGFloat(190 + 240 * drand48())) * speedFactor
+            let droplet = SplashDroplet(
+                x: 120 + CGFloat(drand48()) * 420,
+                y: 2 + CGFloat(drand48()) * 6,
+                vx: (CGFloat(drand48()) - 0.5) * 220,
+                vy: speed,
+                life: 1.1 + CGFloat(drand48()) * 0.6)
+            layer.addSublayer(droplet.layer)
+            droplets.append(droplet)
+        }
+    }
+
+    private func makePanelIfNeeded() {
+        guard panel == nil else { return }
+        let size = CGSize(width: 560, height: 320)
+        let panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+        let container = NSView(frame: NSRect(origin: .zero, size: size))
+        container.wantsLayer = true
+        let host = NSView(frame: container.bounds)
+        host.wantsLayer = true
+        host.layer?.masksToBounds = false
+        container.addSubview(host)
+        panel.contentView = container
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.level = .statusBar
+        panel.ignoresMouseEvents = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        self.panel = panel
+        self.host = host
+    }
+
+    /// Anchors the window at the bottom-right corner of the screen.
+    private func placePanel() {
+        guard let panel, let screen = NSScreen.main else { return }
+        let size = CGSize(width: 560, height: 320)
+        panel.setFrame(NSRect(x: screen.frame.maxX - size.width - 8, y: screen.frame.minY,
+                              width: size.width, height: size.height), display: false)
+    }
+
+    private func ensureRunning() {
+        guard timer == nil else { return }
+        lastBeat = 0
+        let timer = Timer(timeInterval: 1 / 120, target: SplashProxy(self), selector: #selector(SplashProxy.beat),
+                          userInfo: nil, repeats: true)
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    @objc func beat(_ sender: Any) {
+        let now = CACurrentMediaTime()
+        guard lastBeat > 0 else { lastBeat = now; return }
+        let dt = min(CGFloat(0.05), CGFloat(now - lastBeat))
+        lastBeat = now
+        var alive: [SplashDroplet] = []
+        let floorY = CGFloat(2)
+        for droplet in droplets {
+            droplet.age += dt
+            droplet.vy -= 1500 * dt          // the same droplet-scale gravity as the bar
+            droplet.x += droplet.vx * dt
+            droplet.y += droplet.vy * dt
+            let alpha = max(0, 1 - droplet.age / droplet.life)
+            // A couple of bounces on the bottom edge before falling out.
+            if droplet.y < floorY, droplet.vy < 0, droplet.bounces < 2 {
+                droplet.y = floorY
+                droplet.vy = -droplet.vy * 0.42
+                droplet.vx *= 0.7
+                droplet.bounces += 1
+            }
+            if droplet.y < -14 || alpha <= 0.01 {   // fallen out of the screen or faded
+                droplet.layer.removeFromSuperlayer()
+            } else {
+                droplet.layer.opacity = Float(alpha)
+                droplet.layer.position = CGPoint(x: droplet.x, y: droplet.y)
+                alive.append(droplet)
+            }
+        }
+        droplets = alive
+        if droplets.isEmpty {
+            timer?.invalidate()
+            timer = nil
+            lastBeat = 0
+            if testHost == nil { panel?.orderOut(nil) }
+        }
+    }
+}
+
+let volumeSplash = VolumeKeySplash()
+
+// Reports system volume changes (volume keys, media keys, the menu bar
+// slider) by watching the default output device's volume scalar through
+// public CoreAudio — no permissions, and it follows default-device switches.
+// The volume property lives under the output scope, often per channel rather
+// than on a master element, so the watcher probes elements 0–3 and listens
+// on every one that is readable (a Bluetooth headset typically reports on
+// its left and right channels; built-in speakers on the master element).
+enum VolumeWatcher {
+    private static var watchedDevice: AudioDeviceID = 0
+    private static var watchedElements: [AudioObjectPropertyElement] = []
+
+    private static func volumeAddress(_ element: AudioObjectPropertyElement) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyVolumeScalar,
+                                   mScope: kAudioObjectPropertyScopeOutput,
+                                   mElement: element)
+    }
+
+    static func start() {
+        watchDefaultDevice()
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main) { _, _ in
+            watchDefaultDevice()
+        }
+    }
+
+    /// Moves the volume listeners to whatever the default output device is now.
+    private static func watchDefaultDevice() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var device: AudioDeviceID = 0
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device) == noErr,
+              device != 0, device != watchedDevice else { return }
+
+        if watchedDevice != 0 {
+            for element in watchedElements {
+                var old = volumeAddress(element)
+                AudioObjectRemovePropertyListenerBlock(watchedDevice, &old, .main) { _, _ in }
+            }
+        }
+        watchedDevice = device
+        watchedElements = []
+
+        for element: AudioObjectPropertyElement in [0, 1, 2, 3] {
+            var read = volumeAddress(element)
+            var volume: Float32 = 0
+            var size: UInt32 = UInt32(MemoryLayout<Float32>.size)
+            guard AudioObjectGetPropertyData(device, &read, 0, nil, &size, &volume) == noErr else { continue }
+            var listener = volumeAddress(element)
+            let status = AudioObjectAddPropertyListenerBlock(device, &listener, .main) { _, _ in
+                DispatchQueue.main.async { report(element: element) }
+            }
+            guard status == noErr else { continue }
+            watchedElements.append(element)
+        }
+        if let first = watchedElements.first {
+            report(element: first)   // seed the previous-volume memory so the first real change has a direction
+        }
+    }
+
+    /// Reads the volume on one element and hands the change to the splash
+    /// emitter. Both channels of a stereo device fire per change; identical
+    /// consecutive values are ignored, so duplicates are harmless.
+    private static func report(element: AudioObjectPropertyElement) {
+        guard watchedDevice != 0 else { return }
+        var address = volumeAddress(element)
+        var volume: Float32 = 0
+        var size: UInt32 = UInt32(MemoryLayout<Float32>.size)
+        guard AudioObjectGetPropertyData(watchedDevice, &address, 0, nil, &size, &volume) == noErr else { return }
+        volumeSplash.volumeChanged(to: Double(volume), reason: "ExplicitVolumeChange")
+    }
+}
+
 @main
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static func main() {
@@ -675,6 +919,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if installTaps() { timer.invalidate() }
             }
         }
+        // System volume changes (volume keys, media keys, the menu bar slider)
+        // splash droplets up from the bottom-right of the screen. The
+        // AVSystemController distributed notification does not reach other
+        // processes on modern macOS, so this watches the default output
+        // device's volume through public CoreAudio instead.
+        VolumeWatcher.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
